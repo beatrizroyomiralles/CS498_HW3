@@ -1,0 +1,154 @@
+                                                                                                                                           app.py         
+from flask import Flask
+from google.cloud import bigtable
+
+app = Flask(__name__)
+
+# Configuración de Bigtable
+project_id = "cs444hw2"  # <--- TU PROJECT ID
+instance_id = "ev-bigtable"
+table_id = "ev-population"
+column_family_id = "ev_info"
+
+client = bigtable.Client(project=project_id, admin=True)
+instance = client.instance(instance_id)
+table = instance.table(table_id)
+
+@app.route('/')
+def home():
+    return "🚗 EV Bigtable API is running!"
+
+@app.route('/rows')
+def count_rows():
+    rows = table.read_rows()
+    count = sum(1 for _ in rows)
+    return f"Total rows in Bigtable: {count}"
+
+@app.route('/Best-BMW')
+def best_bmw():
+    rows = table.read_rows()
+    count = 0
+    print("Mostrando 10 valores de 'make' y 'electric range':")
+    for i, row in enumerate(rows):
+        cells = row.cells.get(column_family_id, {})
+        make = cells.get(b'make', [None])[0]
+        electric_range = cells.get(b'electric range', [None])[0]
+
+        make_val = make.value.decode('utf-8') if make else ''
+        range_val = electric_range.value.decode('utf-8') if electric_range else '0'
+
+        # Mostrar algunos ejemplos para depurar
+        if i < 10:
+            print(f"{i}. Make: {make_val}, Electric Range: {range_val}")
+
+        try:
+            if make_val.strip().upper() == "BMW" and float(range_val) > 100:
+                count += 1
+        except:
+            continue
+
+    return f"BMWs with Electric Range > 100: {count}"
+
+@app.route('/tesla-owners')
+def tesla_owners():
+    rows = table.read_rows()
+    count = 0
+    for row in rows:
+        cells = row.cells.get(column_family_id, {})
+        make = cells.get('make', [])[0].value.decode('utf-8').strip().upper() if 'make' in cells else ''
+        city = cells.get('city', [])[0].value.decode('utf-8').strip().upper() if 'city' in cells else ''
+        if make == 'TESLA' and city == 'SEATTLE':
+            count += 1
+    return f"Teslas registered in Seattle: {count}"
+
+@app.route('/debug-columns')
+def debug_columns():
+    rows = table.read_rows()
+    for row in rows:
+        print(f"Row key: {row.row_key.decode('utf-8')}")
+        print("Column families y columnas:")
+        for cf, columns in row.cells.items():
+            print(f" - Column family: {cf}")
+            for col in columns:
+                print(f"   • Column: {col}")
+        break
+    return "✅ Columnas mostradas en la consola"
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
+
+import pandas as pd
+from google.cloud import bigtable
+
+# Ruta al archivo
+CSV_FILE = "Electric_Vehicle_Population_Data.csv"
+
+# Leer CSV
+df = pd.read_csv(
+    CSV_FILE,
+    encoding='latin1',
+    sep=',',
+    quotechar='"',
+    on_bad_lines='skip',
+    engine='python'
+)
+
+# Limpiar nombres de columnas
+df.columns = df.columns.str.strip()
+
+# Mostrar columnas
+print("Columnas disponibles:", df.columns.tolist())
+
+# Eliminar filas con valores vacíos clave
+df = df.dropna(subset=['VIN (1-10)', 'Make', 'Model', 'Model Year', 'City', 'County'])
+
+# Helper para codificar strings
+def safe_str(value):
+    return str(value).strip().encode('utf-8')
+
+# Configuración
+project_id = "cs444hw2"
+instance_id = "ev-bigtable"
+table_id = "ev-population"
+column_family_id = "ev_info"
+
+client = bigtable.Client(project=project_id, admin=True)
+instance = client.instance(instance_id)
+table = instance.table(table_id)
+
+print("🚀 Cargando datos en Bigtable...")
+batch_size = 100
+rows = []
+
+for index, row_data in df.iterrows():
+    row_key = safe_str(row_data['VIN (1-10)'])
+    make = str(row_data['Make']).strip()
+    range_val = row_data.get('Electric Range', '')
+
+    # 🐞 Mostrar los valores para verificar
+    print(f"[{index}] Make: {make}, Electric Range: {range_val}")
+
+    bt_row = table.direct_row(row_key)
+    bt_row.set_cell(column_family_id, "make", safe_str(make))
+    bt_row.set_cell(column_family_id, "model", safe_str(row_data['Model']))
+    bt_row.set_cell(column_family_id, "model year", safe_str(int(row_data['Model Year'])))
+    bt_row.set_cell(column_family_id, "city", safe_str(row_data['City']))
+    bt_row.set_cell(column_family_id, "county", safe_str(row_data['County']))
+
+    # Si el campo existe y no está vacío
+    if pd.notna(range_val) and range_val != '':
+        bt_row.set_cell(column_family_id, "electric range", safe_str(range_val))
+
+    rows.append(bt_row)
+
+    # Enviar en lotes
+    if len(rows) >= batch_size:
+        table.mutate_rows(rows)
+        rows = []
+
+# Último lote
+if rows:
+    table.mutate_rows(rows)
+
+print("✅ ¡Datos cargados correctamente en Bigtable!")
